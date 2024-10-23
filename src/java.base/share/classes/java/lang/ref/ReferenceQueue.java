@@ -25,11 +25,10 @@
 
 package java.lang.ref;
 
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import jdk.internal.misc.VM;
+import jdk.internal.vm.Continuation;
+import jdk.internal.vm.ContinuationSupport;
 
 /**
  * Reference queues, to which registered reference objects are appended by the
@@ -50,8 +49,6 @@ import jdk.internal.misc.VM;
 
 public class ReferenceQueue<T> {
     private static class Null extends ReferenceQueue<Object> {
-        public Null() { super(0); }
-
         @Override
         boolean enqueue(Reference<?> r) {
             return false;
@@ -64,20 +61,8 @@ public class ReferenceQueue<T> {
     private volatile Reference<? extends T> head;
     private long queueLength = 0;
 
-    private final ReentrantLock lock;
-    private final Condition notEmpty;
-
-    void signal() {
-        notEmpty.signalAll();
-    }
-
-    void await() throws InterruptedException {
-        notEmpty.await();
-    }
-
-    void await(long timeoutMillis) throws InterruptedException {
-        notEmpty.await(timeoutMillis, TimeUnit.MILLISECONDS);
-    }
+    private static class Lock { };
+    private final Lock lock = new Lock();
 
     /**
      * Constructs a new reference-object queue.
@@ -92,7 +77,7 @@ public class ReferenceQueue<T> {
         this.notEmpty = null;
     }
 
-    final boolean enqueue0(Reference<? extends T> r) { // must hold lock
+    private boolean enqueue0(Reference<? extends T> r) { // must hold lock
         // Check that since getting the lock this reference hasn't already been
         // enqueued (and even then removed)
         ReferenceQueue<?> queue = r.queue;
@@ -111,7 +96,7 @@ public class ReferenceQueue<T> {
         if (r instanceof FinalReference) {
             VM.addFinalRefCount(1);
         }
-        signal();
+        lock.notifyAll();
         return true;
     }
 
@@ -119,7 +104,7 @@ public class ReferenceQueue<T> {
         return head == null;
     }
 
-    final Reference<? extends T> poll0() { // must hold lock
+    private Reference<? extends T> poll0() { // must hold lock
         Reference<? extends T> r = head;
         if (r != null) {
             r.queue = NULL;
@@ -142,16 +127,14 @@ public class ReferenceQueue<T> {
         return null;
     }
 
-    final Reference<? extends T> remove0(long timeout)
-            throws IllegalArgumentException, InterruptedException { // must hold lock
+    private Reference<? extends T> remove0(long timeout) throws IllegalArgumentException, InterruptedException { // must hold lock
         Reference<? extends T> r = poll0();
         if (r != null) return r;
         long start = System.nanoTime();
         for (;;) {
-            await(timeout);
+            lock.await(timeout);
             r = poll0();
             if (r != null) return r;
-
             long end = System.nanoTime();
             timeout -= (end - start) / 1000_000;
             if (timeout <= 0) return null;
@@ -159,21 +142,31 @@ public class ReferenceQueue<T> {
         }
     }
 
-    final Reference<? extends T> remove0() throws InterruptedException { // must hold lock
+    private Reference<? extends T> remove0() throws InterruptedException { // must hold lock
         for (;;) {
             var r = poll0();
             if (r != null) return r;
-            await();
+            lock.wait();
         }
     }
 
     boolean enqueue(Reference<? extends T> r) { /* Called only by Reference class */
-        lock.lock();
-        try {
+        synchronized (lock) {
             return enqueue0(r);
-        } finally {
-            lock.unlock();
         }
+    }
+
+    private boolean tryDisablePreempt() {
+        if (Thread.currentThread().isVirtual() && ContinuationSupport.isSupported()) {
+            Continuation.pin();
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    private void enablePreempt() {
+        Continuation.unpin();
     }
 
     /**
@@ -186,13 +179,18 @@ public class ReferenceQueue<T> {
      * @see java.lang.ref.Reference#enqueue()
      */
     public Reference<? extends T> poll() {
-        if (headIsNull())
+        if (head == null)
             return null;
-        lock.lock();
+
+        // Prevent a virtual thread from being preempted as this could potentially
+        // deadlock with a carrier that is polling the same reference queue.
+        boolean disabled = tryDisablePreempt();
         try {
-            return poll0();
+            synchronized (lock) {
+                return poll0();
+            }
         } finally {
-            lock.unlock();
+            if (disabled) enablePreempt();
         }
     }
 
@@ -224,11 +222,8 @@ public class ReferenceQueue<T> {
         if (timeout == 0)
             return remove();
 
-        lock.lock();
-        try {
+        synchronized (lock) {
             return remove0(timeout);
-        } finally {
-            lock.unlock();
         }
     }
 
@@ -241,11 +236,8 @@ public class ReferenceQueue<T> {
      * @see java.lang.ref.Reference#enqueue()
      */
     public Reference<? extends T> remove() throws InterruptedException {
-        lock.lock();
-        try {
+        synchronized (lock) {
             return remove0();
-        } finally {
-            lock.unlock();
         }
     }
 
