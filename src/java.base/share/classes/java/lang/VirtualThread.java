@@ -163,6 +163,9 @@ final class VirtualThread extends BaseVirtualThread {
     // linked list head reference for the unblocked vthread list
     private static volatile VirtualThread head;
 
+    // linked list tail reference for the unblocked vthread list
+    private static volatile VirtualThread tail;
+
     // parking permit made available by LockSupport.unpark
     private volatile boolean parkPermit;
 
