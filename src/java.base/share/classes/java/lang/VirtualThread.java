@@ -829,7 +829,7 @@ final class VirtualThread extends BaseVirtualThread {
         setParkPermit(false);
 
         // JFR jdk.VirtualThreadPinned event
-        postPinnedEvent("LockSupport.park");
+        //postPinnedEvent("LockSupport.park");
     }
 
     /**
