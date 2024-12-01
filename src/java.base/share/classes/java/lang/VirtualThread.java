@@ -160,6 +160,9 @@ final class VirtualThread extends BaseVirtualThread {
     // can be suspended from scheduling when unmounted
     private static final int SUSPENDED = 1 << 8;
 
+    // linked list head reference for the unblocked vthread list
+    private static volatile VirtualThread head;
+
     // parking permit made available by LockSupport.unpark
     private volatile boolean parkPermit;
 
